@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cosmic Dots Retargeting Demo</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: sans-serif;
+            display: flex;
+            height: 100vh;
+            background-color: #111;
+            color: #eee;
+            overflow: hidden; /* Prevents scrollbars if canvas is slightly too big */
+        }
+
+        #controls {
+            width: 280px; /* Slightly wider for new control */
+            padding: 20px;
+            background-color: #222;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            overflow-y: auto;
+        }
+
+        #controls label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+
+        #controls input[type="range"] {
+            width: 100%;
+        }
+        
+        #controls .control-group {
+            border: 1px solid #444;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        #controls .control-group span {
+            font-size: 0.8em;
+            color: #aaa;
+        }
+
+        #simulation-area {
+            flex-grow: 1;
+            position: relative; /* For canvas positioning */
+            background-color: #000;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h2>Controls</h2>
+        
+        <div class="control-group">
+            <label for="totalDots">Total Dots: <span id="totalDotsValue">210</span></label>
+            <input type="range" id="totalDots" min="50" max="10000" value="1000" step="1">
+        </div>
+
+        <div class="control-group">
+            <label for="shipToStationRatio">Ship/Station Ratio: <span id="shipToStationRatioValue">20</span></label>
+            <input type="range" id="shipToStationRatio" min="50" max="200" value="100" step="1">
+        </div>
+
+        <div class="control-group">
+            <label for="baseShipSpeed">Base Ship Speed: <span id="baseShipSpeedValue">1.5</span></label>
+            <input type="range" id="baseShipSpeed" min="0.1" max="5" value="0.5" step="0.1">
+        </div>
+        
+        <p style="font-size: 0.8em; color: #aaa;">Stations change state every 5s. State 1 stations are undesirable. Ships retarget if their destination becomes State 1.</p>
+        <button id="resetButton">Reset Simulation</button>
+    </div>
+
+    <div id="simulation-area">
+        <canvas id="simulationCanvas"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simulationCanvas');
+        const ctx = canvas.getContext('2d');
+        const simulationArea = document.getElementById('simulation-area');
+
+        // Control elements
+        const totalDotsInput = document.getElementById('totalDots');
+        const shipToStationRatioInput = document.getElementById('shipToStationRatio');
+        const baseShipSpeedInput = document.getElementById('baseShipSpeed');
+        
+        const totalDotsValueSpan = document.getElementById('totalDotsValue');
+        const shipToStationRatioValueSpan = document.getElementById('shipToStationRatioValue');
+        const baseShipSpeedValueSpan = document.getElementById('baseShipSpeedValue');
+        const resetButton = document.getElementById('resetButton');
+
+        let stations = [];
+        let spaceships = [];
+        let stationStateUpdateIntervalId = null;
+
+        // --- Configuration ---
+        let CONFIG = {
+            TOTAL_DOTS: parseInt(totalDotsInput.value),
+            SHIP_TO_STATION_RATIO: parseInt(shipToStationRatioInput.value),
+            BASE_SHIP_SPEED: parseFloat(baseShipSpeedInput.value),
+            
+            MIN_STATION_SIZE_VISUAL: 10, 
+            MAX_STATION_SIZE_VISUAL: 20, 
+            MIN_SHIP_SIZE: 2,
+            MAX_SHIP_SIZE: 6,
+            
+            STATION_STATE_CHANGE_INTERVAL: 5000, 
+            STATION_SIZE_SMOOTHING: 0.05, 
+            
+            SHIP_COLOR: '#00FFFF', 
+            STATION_COLORS: ['#00BBBB', '#00CCCC', '#00DDDD', '#00EEEE', '#00FFFF'], 
+            SHIP_ARRIVAL_THRESHOLD: 5, 
+            BORDER_PADDING: 50 
+        };
+
+        function updateConfigFromUI() {
+            CONFIG.TOTAL_DOTS = parseInt(totalDotsInput.value);
+            CONFIG.SHIP_TO_STATION_RATIO = parseInt(shipToStationRatioInput.value);
+            CONFIG.BASE_SHIP_SPEED = parseFloat(baseShipSpeedInput.value);
+            
+            totalDotsValueSpan.textContent = CONFIG.TOTAL_DOTS;
+            shipToStationRatioValueSpan.textContent = CONFIG.SHIP_TO_STATION_RATIO;
+            baseShipSpeedValueSpan.textContent = CONFIG.BASE_SHIP_SPEED.toFixed(1);
+        }
+
+        function getStationVisualSize(state) {
+            if (state === 1) {
+                return CONFIG.MIN_STATION_SIZE_VISUAL * 0.6; 
+            }
+            const openStatesCount = 4; 
+            const normalizedStateProgress = (state - 2) / (openStatesCount - 1); 
+            return CONFIG.MIN_STATION_SIZE_VISUAL + normalizedStateProgress * (CONFIG.MAX_STATION_SIZE_VISUAL - CONFIG.MIN_STATION_SIZE_VISUAL);
+        }
+        
+        function resizeCanvas() {
+            canvas.width = simulationArea.clientWidth;
+            canvas.height = simulationArea.clientHeight;
+        }
+
+        function createStationsAndSpaceships() {
+            stations = [];
+            spaceships = [];
+
+            const numStations = Math.max(1, Math.round(CONFIG.TOTAL_DOTS / (CONFIG.SHIP_TO_STATION_RATIO + 1)));
+            const numSpaceships = CONFIG.TOTAL_DOTS - numStations;
+
+            // Create Stations
+            for (let i = 0; i < numStations; i++) {
+                const initialState = Math.floor(Math.random() * 5) + 1; 
+                const visualSize = getStationVisualSize(initialState);
+                stations.push({
+                    id: `station-${i}`,
+                    x: CONFIG.BORDER_PADDING + Math.random() * (canvas.width - 2 * CONFIG.BORDER_PADDING),
+                    y: CONFIG.BORDER_PADDING + Math.random() * (canvas.height - 2 * CONFIG.BORDER_PADDING),
+                    state: initialState,
+                    size: visualSize, 
+                    targetSize: visualSize, 
+                    color: CONFIG.STATION_COLORS[initialState-1] || CONFIG.STATION_COLORS[0]
+                });
+            }
+
+            if (stations.length === 0) {
+                console.error("No stations created. Aborting spaceship creation.");
+                return;
+            }
+
+            // Create Spaceships
+            for (let i = 0; i < numSpaceships; i++) {
+                const size = CONFIG.MIN_SHIP_SIZE + Math.random() * (CONFIG.MAX_SHIP_SIZE - CONFIG.MIN_SHIP_SIZE);
+                const speedFactor = (CONFIG.MAX_SHIP_SIZE - size + 1) / (CONFIG.MAX_SHIP_SIZE - CONFIG.MIN_SHIP_SIZE + 1);
+                const speed = CONFIG.BASE_SHIP_SPEED * (1 + speedFactor * 0.5); 
+
+                const startStationIndex = Math.floor(Math.random() * stations.length);
+                const startStation = stations[startStationIndex];
+                
+                spaceships.push({
+                    id: `ship-${i}`,
+                    x: startStation.x,
+                    y: startStation.y,
+                    size: size,
+                    speed: Math.max(0.1, speed),
+                    color: CONFIG.SHIP_COLOR,
+                    currentStation: startStation, 
+                    targetStation: null 
+                });
+            }
+            spaceships.forEach(ship => {
+                ship.targetStation = pickNextStation(ship.currentStation);
+            });
+        }
+
+        function pickNextStation(currentStationObj) {
+            if (!stations || stations.length === 0) return null;
+            
+            // If only one station exists, it's the only target, regardless of state.
+            if (stations.length === 1) return stations[0];
+
+            // Find stations that are NOT the current one AND are "open" (state > 1)
+            const eligibleTargets = stations.filter(s => s.id !== currentStationObj?.id && s.state > 1);
+
+            if (eligibleTargets.length > 0) {
+                return eligibleTargets[Math.floor(Math.random() * eligibleTargets.length)];
+            } else {
+                // No *other* stations are open.
+                // If currentStation is defined and open, target it (ship will "wait" or "stay").
+                if (currentStationObj && currentStationObj.state > 1) {
+                    return currentStationObj;
+                }
+                // If currentStation is closed or undefined, and no other open stations,
+                // then effectively the ship has nowhere "desirable" to go.
+                // Return the current station (even if closed) or the first station as a last resort.
+                // The movement logic will prevent movement if the target is closed.
+                return currentStationObj || stations[0]; // Fallback to current or first
+            }
+        }
+
+        function updateStationStatesAndVisuals() {
+            stations.forEach(station => {
+                station.state = Math.floor(Math.random() * 5) + 1; 
+                station.targetSize = getStationVisualSize(station.state); 
+                station.color = CONFIG.STATION_COLORS[station.state - 1] || CONFIG.STATION_COLORS[0]; 
+            });
+        }
+        
+        function smoothlyUpdateStationVisualSize() {
+            stations.forEach(station => {
+                if (Math.abs(station.size - station.targetSize) > 0.1) { 
+                    station.size += (station.targetSize - station.size) * CONFIG.STATION_SIZE_SMOOTHING;
+                } else {
+                    station.size = station.targetSize; 
+                }
+            });
+        }
+
+        function updateSpaceships() {
+            spaceships.forEach(ship => {
+                // Ensure ship has a currentStation for context if possible
+                if (!ship.currentStation && stations.length > 0) {
+                    ship.currentStation = stations.find(s => s.state > 1) || stations[0]; // Prefer open, fallback
+                }
+
+                // 1. Mid-flight retargeting: If current target becomes undesirable (state 1)
+                if (ship.targetStation && ship.targetStation.state === 1) {
+                    const oldTargetId = ship.targetStation.id;
+                    const newTarget = pickNextStation(ship.currentStation || ship.targetStation); 
+
+                    // Only change if newTarget is valid, desirable, and different OR if newTarget is desirable and current target was not
+                    if (newTarget && newTarget.state > 1) {
+                         ship.targetStation = newTarget;
+                    }
+                    // If no desirable new target found, ship keeps its current (state 1) target.
+                    // Movement logic below will prevent motion towards it.
+                }
+
+                // 2. If ship has no target (e.g., after arrival, or if retargeting made it null), pick one.
+                if (!ship.targetStation) {
+                    if (ship.currentStation) {
+                        ship.targetStation = pickNextStation(ship.currentStation);
+                    } else if (stations.length > 0) { // Absolute fallback
+                        ship.targetStation = pickNextStation(stations[0]); 
+                    }
+                }
+
+                if (!ship.targetStation) return; // Still no target, ship waits.
+
+                const target = ship.targetStation;
+
+                // 3. Movement and Arrival Logic
+                const dx = target.x - ship.x;
+                const dy = target.y - ship.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                if (distance < (target.size + CONFIG.SHIP_ARRIVAL_THRESHOLD)) { // Arrived
+                    ship.currentStation = target; // Update current location reference
+                    ship.x = target.x; // Snap to center
+                    ship.y = target.y;
+
+                    // Regardless of target's state upon arrival, pick a new destination.
+                    // If it was closed, it "bounces". If open, it "docks" and then departs.
+                    ship.targetStation = pickNextStation(target); 
+                } else { // Not yet arrived: Move towards target
+                    // Only move if the target is desirable (state > 1).
+                    if (target.state > 1) {
+                        ship.x += (dx / distance) * ship.speed;
+                        ship.y += (dy / distance) * ship.speed;
+                    }
+                    // If target.state === 1, the ship does not move.
+                    // It will re-evaluate its target on the next frame (due to logic in step 1 or 2).
+                }
+            });
+        }
+
+        function draw() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            stations.forEach(station => {
+                ctx.beginPath();
+                ctx.arc(station.x, station.y, Math.max(1, station.size), 0, Math.PI * 2); 
+                ctx.fillStyle = station.color;
+                ctx.globalAlpha = station.state === 1 ? 0.5 : 1.0; // Dim closed stations
+                ctx.fill();
+                // Optional: Draw station state number
+                // ctx.fillStyle = '#FFF';
+                // ctx.font = '10px sans-serif';
+                // ctx.textAlign = 'center';
+                // ctx.fillText(station.state, station.x, station.y + 3);
+                ctx.globalAlpha = 1.0; 
+            });
+
+            spaceships.forEach(ship => {
+                ctx.beginPath();
+                ctx.arc(ship.x, ship.y, ship.size, 0, Math.PI * 2);
+                ctx.fillStyle = ship.color;
+                ctx.globalAlpha = 0.8; 
+                ctx.fill();
+                ctx.globalAlpha = 1.0; 
+            });
+        }
+        
+        function resetSimulation() {
+            updateConfigFromUI();
+            resizeCanvas(); 
+            
+            if (stationStateUpdateIntervalId) {
+                clearInterval(stationStateUpdateIntervalId);
+            }
+            
+            createStationsAndSpaceships();
+            
+            stations.forEach(s => { 
+                s.targetSize = getStationVisualSize(s.state);
+                s.size = s.targetSize; 
+                s.color = CONFIG.STATION_COLORS[s.state - 1] || CONFIG.STATION_COLORS[0];
+            });
+
+            stationStateUpdateIntervalId = setInterval(updateStationStatesAndVisuals, CONFIG.STATION_STATE_CHANGE_INTERVAL);
+        }
+        
+        function gameLoop() {
+            smoothlyUpdateStationVisualSize(); 
+            updateSpaceships();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Event Listeners
+        window.addEventListener('resize', resetSimulation); 
+        totalDotsInput.addEventListener('input', updateConfigFromUI);
+        shipToStationRatioInput.addEventListener('input', updateConfigFromUI);
+        baseShipSpeedInput.addEventListener('input', updateConfigFromUI);
+        
+        totalDotsInput.addEventListener('change', resetSimulation);
+        shipToStationRatioInput.addEventListener('change', resetSimulation);
+        baseShipSpeedInput.addEventListener('change', resetSimulation);
+        resetButton.addEventListener('click', resetSimulation);
+
+        // Initial Setup
+        updateConfigFromUI(); 
+        resetSimulation();    
+        requestAnimationFrame(gameLoop); 
+    </script>
+</body>
+</html>
